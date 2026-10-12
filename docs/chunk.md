@@ -208,6 +208,9 @@ query and fragment are cut at the first `?`/`#` before the identity is derived.
   `net/url`, `strings`).
 - `Config` is a small value passed by value.
 
+The identity correction and rollout decision are recorded in
+[ADR-0004](./adr/0004-preserve-escaped-origin-identities.md).
+
 ## 6. Determinism / Stability Contract
 
 <!-- CANONICAL id="chunkkey-wire" -->

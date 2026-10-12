@@ -375,7 +375,7 @@ doubles as the health probe that restores the data path.
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **89.8%** of statements. Uncovered lines are a couple of rare
+- **Coverage**: **89.9%** of statements. Uncovered lines are a couple of rare
   I/O-error branches.
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.
