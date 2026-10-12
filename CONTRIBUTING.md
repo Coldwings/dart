@@ -24,15 +24,20 @@ waits for membership to converge, and reports what they are doing. See the
 
 ## Before you open a pull request
 
-All three must pass:
+All three must pass (verbatim copy of the canonical list in AGENTS.md — edit
+both or neither):
 
+<!-- CANONICAL-COPY source="AGENTS.md" id="verify-trio" -->
 ```bash
 go vet ./...
 go test ./... -race -count=1
 go test ./... -cover -count=1
 ```
+<!-- /CANONICAL-COPY source="AGENTS.md" id="verify-trio" -->
 
-CI runs exactly these, so a green local run should mean a green CI run.
+CI runs exactly these, so a green local run should mean a green CI run. See
+AGENTS.md's "Authority and canonical sources" for how rule conflicts between
+repository documents are resolved.
 
 Alongside the code, please include:
 
@@ -43,6 +48,16 @@ Alongside the code, please include:
   sections; a change to a package's behavior is expected to update its document.
   See [docs/README.md](./docs/README.md) for the template and the rationale. A new
   package also gets a row in that index.
+
+Documentation has a floor, checked by the CI job "docs governance"
+(`bash scripts/check-docs.sh` — runnable locally, takes ~2s). It is split
+into a **hard gate** — index sync, documented test names, ADR integrity,
+canonical-copy lockstep, written evidence anchors — that fails CI, and
+**advisory notes** — exported-symbol naming, required sections, ADR
+back-references — that arrive as a non-blocking PR comment instead. Advisory
+notes need a disposition in the PR thread: fixed, or waived with a stated
+reason. The canonical statement lives in [docs/README.md](./docs/README.md)
+("Enforcement tiers").
 
 ## Things that are easy to break
 

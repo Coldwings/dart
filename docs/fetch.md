@@ -63,6 +63,7 @@ type HTTPFetcher struct {
   or the wrong offset would otherwise have its bytes cached under the block's
   key, and the block cache is write-once per key, so that corruption would be
   permanent. `Content-Range` is also parsed for `Total`.
+  Anchor: `internal/fetch/fetch.go::Fetch`.
 - If the origin **ignores** the Range and returns `200`, the window is sliced
   out of the stream **without buffering the whole object**: bytes before `start`
   are discarded, at most `end-start+1` are read, and the rest of the response is
@@ -91,6 +92,12 @@ and close; the fetcher's `Header` is applied first, then the per-request
 is proxying verbatim. This backs the engine's passthrough fallback for
 Range-ignoring origins. Time complexity is O(1); no body bytes are buffered.
 
+`DefaultMaxFlight` bounds how long a shared flight may run before a later call
+starts a new one (the fix for issue #4's permanently-poisoned cache key: a
+stalled flight expires instead of blocking the key forever). Joiners of a
+flight wait inline, one worker goroutine per flight (#60).
+Anchor: `internal/fetch/fetch.go::DefaultMaxFlight`.
+
 ### 3.4 `func FetchBlock(ctx, f Fetcher, url string, blockSize, blockIndex, size int64) (Range, error)`
 
 Fetches one block: `start = blockIndex*blockSize`, `end = start+blockSize-1`.
@@ -111,7 +118,7 @@ index whose start multiplication or end addition would overflow — is an
 **error before the fetcher is invoked**: a wrapped start would otherwise
 recycle to 0 (silently fetching block 0's bytes) or go negative, which
 `HTTPFetcher.Fetch` reads as "no Range header" — a one-block fetch degrading
-into a whole-object GET.
+into a whole-object GET. Anchor: `internal/fetch/fetch.go::FetchBlock`.
 
 ### 3.5 `type Coalescing`
 
@@ -156,6 +163,7 @@ first) the flight becomes **stale**: a caller still waiting re-checks, evicts
 the stale entry, and leads a replacement; a late-finishing stale leader never
 deletes the replacement's entry. Without the bound, one half-dead origin
 connection would poison the cache key for the process lifetime.
+Anchor: `internal/fetch/fetch.go::acquire`.
 
 A flight keeps **exactly one worker goroutine** — started by whoever leads it —
 no matter how many callers join or abandon it: joiners wait inline on the
@@ -165,6 +173,16 @@ not one goroutine per abandoned caller (the issue #53 gap: waiter goroutines
 used to be retained until the flight bound). A corollary of inline waiting: a
 flight everyone abandoned is *not* replaced at its deadline — nobody is left
 wanting the bytes — the stale entry is evicted lazily by the next real caller.
+
+Sharing stops at completion: the worker removes the flight from the group
+**before** publishing its result, so once any call has returned, its flight is
+unreachable and a later — even immediately sequential — call for the same key
+leads a fresh fetch. An error is therefore never replayed to a caller that was
+not still waiting for it (the engine's size probe relies on this: a failed
+probe is re-issued against origin, never served twice — issue #69). The mirror
+cost: a caller arriving in the window between removal and publication leads a
+duplicate fetch instead of sharing the just-finished result — bounded extra
+traffic, by design. Anchor: `internal/fetch/fetch.go::finish`.
 
 Each caller's own `ctx` only bounds how long that caller waits (a cancelled
 caller returns `ctx.Err()`).
@@ -238,9 +256,12 @@ bucket), and that changes three things:
    `start` discarded, at most `end-start+1` read) — the full body is never
    buffered.
 2. **Coalescing**: N concurrent `Coalescing.Fetch` for the same key ⇒ exactly 1
-   call to the underlying `Fetcher`; all callers receive the same result. The one
-   exception is an authorization refusal (401/403), where each joiner re-fetches
-   once with its own credential (§3.6).
+   call to the underlying `Fetcher`; all callers receive the same result.
+   Coalescing never crosses completion: a call issued after its key's flight
+   has returned leads a fresh fetch, so a failure can never be replayed to a
+   later caller (issue #69, §3.5). The one exception is an authorization
+   refusal (401/403), where each joiner re-fetches once with its own
+   credential (§3.6).
 3. **Cancellation isolation**: a caller cancelling its `ctx` neither aborts the
    shared fetch nor affects other callers. The shared flight is itself bounded
    by `MaxFlight` (§3.5), so a stalled origin fails all waiters within the
@@ -329,6 +350,7 @@ go test ./internal/fetch/ -cover -count=1
 | `TestStartFromContentRange` | Content-Range start parsing incl. rejects |
 | `TestCoalescedResultIsMarked` | joined callers see Coalesced=true; the leader does not |
 | `TestUncontendedFetchNotMarkedCoalesced` | an uncontended fetch is not marked coalesced |
+| **`TestSequentialFetchNeverJoinsCompletedFlight`** | **strictly sequential identical fetches never join a completed flight — each reaches the inner fetcher, so an error can never be replayed to a later caller (issue #69; time-boxed `-race` stress)** |
 | `TestFetchBlockPastEndErrors` | a block wholly past the object (or an inverted range) errors without contacting origin |
 | `TestFetchBlockUnknownSizeTailBlock` | an RFC-clamped 206 on the tail block is accepted and reveals Total |
 | **`TestFetchBlockRejectsOverflowGeometry`** | **negative / int64-overflowing block indices (and non-positive block size) error before the fetcher is invoked, size known or unknown (issue #52)** |

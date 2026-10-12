@@ -94,6 +94,8 @@ owner := hashring.Rank(chunkKey, v.Ready())[0] // placement over Ready members
 
 ### 3.3.1 `func ValidMemberID(s string) bool`
 
+Established by [ADR-0002](./adr/0002-visible-ascii-member-ids.md).
+
 The member-ID alphabet: every byte in [0x21, 0x7E] (visible ASCII, no spaces,
 no control bytes). Enforced at both ingress points — `-self-id`/`-peers`
 parsing in `internal/node` and roster ingest in `DynamicProvider.Learn` — so
@@ -152,6 +154,18 @@ carries **addresses**, and a `Member.ID` must be a *stable* identity (never an
 address — see §3.2). Only the peer itself can say what its ID is. Exchanging
 rosters also means one reachable neighbour is enough to find the whole cluster,
 which is what makes a truncated DNS answer or a partial seed list survivable.
+
+### 3.9.1 `DynamicProvider` methods
+
+| Method | Contract |
+|---|---|
+| `Self() Member` | the configured self member (constant after construction). |
+| `Current() *View` / `Subscribe() (<-chan *View, func())` | the `Provider` interface: latest view / view-change feed (unsubscribe via the returned func). |
+| `Run(ctx)` | the background loop: periodic `Refresh` on `RefreshInterval` until `ctx` is canceled. Start it before serving traffic so the first view is in place. |
+| `Refresh(ctx) *View` | one synchronous gather + publish cycle; also callable on demand. |
+| `Learn(members ...Member)` | hearsay ingest: invalid IDs are rejected (§3.3.1) and reported via `OnError`; self entries ignored; valid members are learned immediately. Safe for concurrent use. |
+| `LearnPeer(id, addr string)` | records an inbound contact from `id` at `addr` — refreshes that member's liveness clock (only *direct* contact does) and adopts the newest address. |
+| `Roster() []Member` | the full member list we answer roster fetches with (self included). |
 
 ### Adding and forgetting are not symmetric
 

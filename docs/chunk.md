@@ -46,6 +46,10 @@ func (c Config) BlocksPerChunk() int64
 Constants `MiB` and `GiB` are provided for convenience. All grid methods below
 assume a valid Config.
 
+`ErrInvalidConfig` is the sentinel `Validate` returns for a malformed `Config`
+(`BlockSize>0`, `ChunkSize>0`, `ChunkSize%BlockSize==0` required); wrap-check
+with `errors.Is`.
+
 ### 3.2 Grid math
 
 ```go
@@ -111,6 +115,11 @@ separator. Deleting it would conflate `/a%1Fb` with `/ab`. Parsed paths use
 `URL.EscapedPath`; malformed raw fallbacks escape both `%` and `0x1F`.
 Note that cross-field collisions are the only case: within one namespace the
 fixed 8-byte chunk-index suffix forces equal objectIDs anyway.
+
+`UnitSep` (0x1F) is the field separator `ChunkKey` mixes between fields; it is
+why `namespace` is rejected at engine construction when it contains 0x1F and
+why derived object identities have it stripped (`stripUnitSep`): the separator
+must never appear inside a field, or serialization would not be injective.
 
 ### 3.4.1 `func IsDigest(s string) bool`
 
@@ -201,10 +210,12 @@ query and fragment are cut at the first `?`/`#` before the identity is derived.
 
 ## 6. Determinism / Stability Contract
 
+<!-- CANONICAL id="chunkkey-wire" -->
 - The `ChunkKey` construction is **part of the wire protocol**: it selects chunk
   owners. Changing it reshuffles placement across the cluster and must be treated
   as a breaking change (bump the epoch). It is pinned by a cross-language golden
   test computed with an independent Python implementation.
+<!-- /CANONICAL id="chunkkey-wire" -->
 - `ObjectID`'s digest-extraction and URL-canonicalization rules affect cache
   identity and dedup; changing them changes cache keys and should be versioned
   deliberately.
