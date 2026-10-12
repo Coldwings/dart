@@ -118,8 +118,9 @@ fixed 8-byte chunk-index suffix forces equal objectIDs anyway.
 
 `UnitSep` (0x1F) is the field separator `ChunkKey` mixes between fields; it is
 why `namespace` is rejected at engine construction when it contains 0x1F and
-why derived object identities have it stripped (`stripUnitSep`): the separator
-must never appear inside a field, or serialization would not be injective.
+why derived object identities encode it (`escapeUnitSep` in malformed raw
+fallbacks): a literal separator must never appear inside a field, or serialization
+would not be injective.
 
 ### 3.4.1 `func IsDigest(s string) bool`
 

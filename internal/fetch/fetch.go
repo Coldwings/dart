@@ -502,18 +502,27 @@ func (c *Coalescing) maxFlight() time.Duration {
 // refusal keeps the thundering-herd protection intact on every normal path.
 func (c *Coalescing) Fetch(ctx context.Context, url string, start, end int64) (Range, error) {
 	key := c.identity(url) + "\x00" + strconv.FormatInt(start, 10) + ":" + strconv.FormatInt(end, 10)
-	return c.fetch(ctx, url, start, end, key, &c.g)
+	return c.fetch(ctx, key, &c.g, func(ctx context.Context) (Range, error) {
+		return c.F.Fetch(ctx, url, start, end)
+	})
 }
 
 // Probe coalesces GET bytes=0-0 by OriginKey, independently of Key and of
 // content flights. Immutable bytes can be shared across endpoints, but a size
 // probe's RangeIgnored/Total metadata describes only the endpoint contacted.
+// An inner Prober keeps its endpoint boundary on both the shared request and a
+// credential-refusal retry. Otherwise the inner Fetcher receives GET bytes=0-0.
 // It has Fetch's cancellation, deadline and credential-refusal retry semantics.
 func (c *Coalescing) Probe(ctx context.Context, url string) (Range, error) {
-	return c.fetch(ctx, url, 0, 0, OriginKey(url), &c.probes)
+	return c.fetch(ctx, OriginKey(url), &c.probes, func(ctx context.Context) (Range, error) {
+		if p, ok := c.F.(Prober); ok {
+			return p.Probe(ctx, url)
+		}
+		return c.F.Fetch(ctx, url, 0, 0)
+	})
 }
 
-func (c *Coalescing) fetch(ctx context.Context, url string, start, end int64, key string, g *group) (Range, error) {
+func (c *Coalescing) fetch(ctx context.Context, key string, g *group, doFetch func(context.Context) (Range, error)) (Range, error) {
 	for {
 		flight, lead := g.acquire(key, c.maxFlight())
 		if lead {
@@ -526,7 +535,7 @@ func (c *Coalescing) fetch(ctx context.Context, url string, start, end int64, ke
 			go func() {
 				flightCtx, cancel := context.WithDeadline(context.Background(), flight.end)
 				defer cancel()
-				r, err := c.F.Fetch(flightCtx, url, start, end)
+				r, err := doFetch(flightCtx)
 				g.finish(key, flight, r, err)
 			}()
 		}
@@ -557,7 +566,7 @@ func (c *Coalescing) fetch(ctx context.Context, url string, start, end int64, ke
 		// serves this caller alone, so it uses the caller's context and is
 		// skipped entirely when that caller is already gone.
 		if !lead && refused(err) && ctx.Err() == nil {
-			r, err = c.F.Fetch(ctx, url, start, end)
+			r, err = doFetch(ctx)
 			r.Coalesced = false // these bytes did cross the network for us
 		}
 		return r, err

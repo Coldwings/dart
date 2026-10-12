@@ -157,8 +157,11 @@ bytes after ~one block-transfer time rather than depth x block-transfer time).
   after partial writes returns an error; the server aborts the committed
   response using `http.ErrAbortHandler`, which net/http handles without logging
   a panic stack. Returning normally would emit a valid chunked terminator and
-  hide the failure. The same abort applies to Content-Length responses; early
-  failures still produce the normal error status. Callers invoking `ServeHTTP`
+  hide the failure. The same abort applies to incomplete Content-Length
+  responses. Once all advertised bytes have been flushed, a later source error
+  cannot be signaled through truncation; sources needing an end-of-stream failure
+  signal must omit the sizer and use chunked framing. Early failures still
+  produce the normal error status. Callers invoking `ServeHTTP`
   directly must account for this sentinel panic (the normal HTTP server does).
 - Each write is flushed, pushing bytes downstream promptly.
 - `StreamValidated` calls the validator once on a clean `200` body, before

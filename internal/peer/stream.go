@@ -25,6 +25,8 @@ import (
 // Implementations MUST write exactly n bytes when returning n. If size is
 // known before writing, report it via the sizer callback so the server can set
 // Content-Length; otherwise the response is chunked.
+// Once all advertised bytes are flushed, truncation cannot signal a later
+// error. Sources with fallible work after the final write must omit the sizer.
 //
 // To report that the *origin* refused the fetch-on-behalf (rather than this node
 // failing), return an error satisfying UpstreamRefusedError so the server can set
