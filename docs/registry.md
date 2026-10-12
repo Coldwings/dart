@@ -269,7 +269,8 @@ nodes (see docs/dart.md).
 ## 9. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **86.4%** of statements.
+- **Coverage**: **90.5%** of statements (Go 1.27.0). Remaining gaps are rare
+  transport and response-write error branches.
 - **Reproduce**:
 
 ```bash

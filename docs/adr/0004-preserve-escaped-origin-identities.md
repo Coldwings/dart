@@ -12,6 +12,9 @@ A content digest can identify shared bytes across origins, but cannot establish
 that both endpoints support Range or expose the same size metadata. Existing
 ADRs preserve trusted, immutable origins; none specifies URL identity encoding.
 
+Upstream reports: [#77](https://github.com/data-accelerator/dart/issues/77) and
+[#78](https://github.com/data-accelerator/dart/issues/78).
+
 ## Decision
 
 Preserve escaped path boundaries in fallback object identities and keep endpoint

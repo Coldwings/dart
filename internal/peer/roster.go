@@ -119,9 +119,9 @@ func (s *RosterServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // for the cooldown, and with a cyclic seed list it stalls every node at once.
 //
 // Outcomes are still *recorded*, which makes this doubly useful: because discovery
-// keeps probing at a bounded interval, a peer that comes back has its circuit
-// closed by the next successful roster fetch, so the data path recovers without
-// waiting for a request to be spent on discovering it.
+// keeps probing at a bounded interval, a current-generation success can restore
+// reachability without waiting for a block request. Outstanding data probes still
+// own their slots and must finish before their circuit can recover.
 func (c *Client) FetchRoster(ctx context.Context, addr, selfID, selfAddr string) (Roster, string, error) {
 	var permit breakerPermit
 	if c.Breaker != nil {

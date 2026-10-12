@@ -378,7 +378,7 @@ requests; their bytes are counted as both `client` and `origin_in` wire bytes
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **87.4%** of statements. Uncovered lines are mostly rare I/O
+- **Coverage**: **88.4%** of statements (Go 1.27.0). Uncovered lines are mostly rare I/O
   error branches (short block, mid-stream write error).
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.

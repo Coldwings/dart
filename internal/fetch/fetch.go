@@ -117,7 +117,9 @@ type Prober interface {
 // OriginKey identifies an endpoint, not its content: different hosts or
 // escaped paths stay distinct even when they name the same digest. Scheme and
 // host are lower-cased; userinfo, query and fragment are excluded so credentials
-// never enter metadata keys and refreshed signatures share an endpoint probe.
+// are excluded from parsed metadata keys and refreshed signatures share a probe.
+// Malformed input falls back to the raw string without query or fragment; the
+// fetcher rejects it rather than caching probe metadata.
 func OriginKey(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {

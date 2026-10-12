@@ -340,8 +340,10 @@ A cluster booting together *always* has nodes dialing peers that are not listeni
 yet, and a dial failure opens a circuit on the first attempt; gating discovery on
 that stalls convergence, and with a cyclic seed list it stalls every node at once.
 This was observed in a live 3-node run. Because outcomes are still recorded, a
-successful roster fetch is also what closes a recovered peer's circuit, so discovery
-doubles as the health probe that restores the data path.
+successful current-generation roster fetch can close a recovered peer's circuit
+when no data probes remain outstanding. It never consumes their slots or overrides
+their pending outcomes, so discovery also restores reachability without hiding a
+data-probe failure.
 
 
 ## 4. Invariants & Guarantees
@@ -375,7 +377,7 @@ doubles as the health probe that restores the data path.
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **89.9%** of statements. Uncovered lines are a couple of rare
+- **Coverage**: **90.5%** of statements (Go 1.27.0). Uncovered lines are a couple of rare
   I/O-error branches.
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.
