@@ -62,6 +62,7 @@ type BreakerOptions struct {
 	// Cooldown is how long the circuit stays open before probing again.
 	Cooldown time.Duration
 	// HalfOpenProbes is how many concurrent probes half-open admits.
+	// After the first success, admission pauses until admitted probes finish.
 	HalfOpenProbes int
 	// Now overrides the clock (tests).
 	Now func() time.Time
@@ -86,6 +87,7 @@ type breakerEntry struct {
 	failures   int       // consecutive failures
 	openedAt   time.Time // when the circuit last opened
 	inFlight   int       // half-open probes currently outstanding
+	recovering bool      // freeze admission while a successful probe awaits siblings
 	// lastActive stamps the last request activity (Allow or a Record*
 	// report). It keys LRU eviction under map pressure: an entry nobody
 	// routes to anymore is stale state for a departed address. Read-only
@@ -146,6 +148,7 @@ func (b *Breaker) entryLocked(addr string) *breakerEntry {
 	if e.state == BreakerOpen && b.now().Sub(e.openedAt) >= b.cooldown {
 		e.state = BreakerHalfOpen
 		e.inFlight = 0
+		e.recovering = false
 	}
 	return e
 }
@@ -192,6 +195,7 @@ type breakerPermit struct {
 	breaker    *Breaker
 	entry      *breakerEntry
 	generation uint64
+	probe      bool // this request owns a half-open probe slot
 }
 
 // begin can bypass admission for discovery while still scoping its result.
@@ -205,16 +209,17 @@ func (b *Breaker) begin(addr string, enforce bool) (breakerPermit, bool) {
 		case BreakerOpen:
 			return breakerPermit{}, false
 		case BreakerHalfOpen:
-			if e.inFlight >= b.probes {
+			if e.recovering || e.inFlight >= b.probes {
 				return breakerPermit{}, false
 			}
 			e.inFlight++
 		}
 	}
-	return breakerPermit{breaker: b, entry: e, generation: e.generation}, true
+	return breakerPermit{breaker: b, entry: e, generation: e.generation, probe: enforce && e.state == BreakerHalfOpen}, true
 }
 
-// RecordSuccess reports that addr answered. A success closes the circuit and
+// RecordSuccess reports that addr answered. After outstanding probes finish,
+// success closes the circuit and
 // clears the failure count: the peer is demonstrably reachable.
 func (b *Breaker) RecordSuccess(addr string) {
 	b.record(addr, outcomeAnswered, nil)
@@ -255,15 +260,23 @@ func (b *Breaker) record(addr string, o outcome, permit *breakerPermit) {
 	}
 	e := b.entryLocked(addr)
 	e.lastActive = b.now()
-	if e.inFlight > 0 {
+	if e.inFlight > 0 && (permit == nil || permit.probe) {
 		e.inFlight--
 	}
 	if o == outcomeAnswered {
+		if e.state == BreakerHalfOpen && e.inFlight > 0 {
+			// Keep admitted siblings in the current generation until all
+			// report. A failure must still veto a preceding success. Freeze
+			// admission so a busy peer cannot grow this cohort forever.
+			e.recovering = true
+			return
+		}
 		if e.state != BreakerClosed {
 			e.generation++
 			e.inFlight = 0
 		}
 		e.state, e.failures = BreakerClosed, 0
+		e.recovering = false
 		return
 	}
 	e.failures++
@@ -271,6 +284,7 @@ func (b *Breaker) record(addr string, o outcome, permit *breakerPermit) {
 		e.state = BreakerOpen
 		e.generation++
 		e.inFlight = 0
+		e.recovering = false
 		e.openedAt = b.now()
 	}
 	// Already-open failures never extend cooldown; old permits are ignored.

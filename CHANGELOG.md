@@ -19,6 +19,8 @@ every release's upgrade notes.
   Quarantine parents serving invalid block geometry so retries can use origin.
   Record transport/validation outcomes with admission-generation permits so
   older in-flight completions cannot undo quarantine or consume new probes.
+  Wait for all admitted half-open probes before recovering, preserving a
+  sibling protocol failure even when another probe succeeds first.
   Decline inconsistent block key/Origin URL pairs before cache or upstream access
   so malformed requester addressing cannot quarantine honest parents.
 

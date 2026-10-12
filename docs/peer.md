@@ -197,8 +197,9 @@ immediately with `ErrCircuitOpen` (no dial at all), while still probing so a
 recovered peer is picked back up without operator action.
 
 States: `closed` → (`FailureThreshold` **consecutive** failures) → `open` → (after
-`Cooldown`) → `half-open`, admitting `HalfOpenProbes` probes; a probe success closes
-the circuit, a probe failure re-opens it and restarts the cooldown.
+`Cooldown`) → `half-open`, admitting `HalfOpenProbes` probes. After the first
+success, admission pauses until all admitted probes finish. All must succeed to
+close the circuit; a probe failure re-opens it and restarts the cooldown.
 
 **A `404` is not a failure.** It is a legitimate answer ("I do not hold that
 block") and blocks legitimately 404 all the time in a distributed cache — counting
@@ -254,7 +255,8 @@ half-open invalidates older results. Checking the permit and recording the
 outcome occur under the same mutex: an old success cannot clear quarantine or
 consume a newer half-open probe slot; an old failure cannot undo recovery.
 Evicted entries are not recreated by their old requests' completions. Fresh
-roster requests still bypass admission and can restore discovery reachability.
+roster requests still bypass admission and can restore discovery reachability,
+but do not consume data-probe slots or override outstanding probe outcomes.
 The public `Allow`/`Record*` API remains an explicit, unscoped reporting API;
 callers managing those reports themselves must synchronize their lifecycle.
 
@@ -455,3 +457,7 @@ go test ./internal/peer/ -race -count=1
   on; membership-skew convergence is a later addition.
 - **Zero-copy**: the server currently `Write`s a buffer; serving via
   `sendfile`/`splice` from the store slot is future optimization.
+
+Half-open regression tests: `TestHalfOpenProbesWaitForSiblingOutcome` covers
+concurrent recovery and a sibling hard-failure veto;
+`TestHalfOpenRosterSuccessCannotConsumeDataProbe` covers roster slot ownership.
