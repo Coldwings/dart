@@ -1,6 +1,6 @@
 # ADR-0004: Preserve escaped origin identities independently of endpoint probes
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-10-12
 - Supersedes: none
 - Binds: docs/chunk.md Stability Contract; docs/fetch.md origin probes; docs/engine.md endpoint metadata
