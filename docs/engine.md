@@ -120,10 +120,12 @@ origin and the peer paths:
   mismatched block fails the relay and is never cached. The peer server aborts
   the committed response, so downstream observes truncation even with chunked
   framing. The faulty parent is immediately quarantined through its circuit
-  breaker, so the next request skips it and falls back to origin. A clean HTTP
-  EOF has already reset transport-level consecutive failures; merely adding a
-  soft failure afterwards would never accumulate a threshold across repeated
-  bad blocks. Cooldown/half-open recovery remains unchanged. When the object
+  breaker, so the next request skips it and falls back to origin. Validation
+  runs inside `Client.StreamValidated` before any success is recorded, under
+  the peer request's timeout context. Transport and validation results use
+  the same admission-generation permit, so a pre-quarantine completion cannot
+  clear a newer circuit or consume its half-open probe slot.
+  Cooldown/half-open recovery remains unchanged. When the object
   size cannot be resolved, relayed bytes cannot be validated and are not cached.
 
 This is load-bearing because the block cache is **write-once per key**: a later
@@ -359,7 +361,7 @@ requests; their bytes are counted as both `client` and `origin_in` wire bytes
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **87.0%** of statements. Uncovered lines are mostly rare I/O
+- **Coverage**: **86.9%** of statements. Uncovered lines are mostly rare I/O
   error branches (short block, mid-stream write error).
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.

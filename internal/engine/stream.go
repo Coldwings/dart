@@ -132,33 +132,30 @@ func (e *Engine) relayFromParent(ctx context.Context, req peer.BlockRequest, w i
 	}
 	var buf bytes.Buffer
 	up := peer.BlockRequest{Key: req.Key, URL: req.URL, Hop: req.Hop + 1}
-	n, held, err := e.peer.Stream(ctx, addr, up, io.MultiWriter(w, &buf))
+	// Validate before the peer client records success, using the same
+	// admission-generation permit as the transport outcome. A late success
+	// from a pre-quarantine request cannot close the parent's newer circuit.
+	validated := false
+	validate := func(validationCtx context.Context, n int64) error {
+		size, serr := e.Size(validationCtx, req.URL)
+		if serr != nil || size < 0 || e.RangeUnsupported(req.URL) {
+			return nil // unvalidated bytes may be served on, but never cached
+		}
+		want := e.blockLen(size, int64(req.Key.Block))
+		if want <= 0 || n != want || int64(buf.Len()) != want {
+			return fmt.Errorf("engine: relayed block %d has %d bytes, want %d", req.Key.Block, n, want)
+		}
+		validated = true
+		return nil
+	}
+	n, held, err := e.peer.StreamValidated(ctx, addr, up, io.MultiWriter(w, &buf), validate)
 	if err != nil || !held {
 		return n, false, err
 	}
-	// Cache what we relayed (best effort; a store error must not fail the
-	// relay) — but only after validating the length against the object
-	// geometry. Relay responses carry no Content-Length, so the transport
-	// cannot detect a short clean chunked EOF; the relay must enforce what
-	// the buffered path enforces in block(), or a wrongly-sized block would
-	// sit in the write-once cache permanently and propagate to every
-	// downstream hop. A mismatch fails the stream so the peer server aborts
-	// its committed response instead of reporting clean chunked success.
-	// When the size cannot be resolved, the relayed bytes cannot be validated,
-	// so they are not cached either.
-	size, serr := e.Size(ctx, req.URL)
-	if serr == nil && size >= 0 && !e.RangeUnsupported(req.URL) {
-		want := e.blockLen(size, int64(req.Key.Block))
-		if want <= 0 || n != want || int64(buf.Len()) != want {
-			if e.peer.Breaker != nil {
-				// Stream recorded the clean HTTP EOF as success, clearing
-				// consecutive failures. This block is definitively unusable:
-				// quarantine its parent immediately, or each next clean but
-				// invalid response would reset a soft-failure budget again.
-				e.peer.Breaker.RecordHardFailure(addr)
-			}
-			return n, false, fmt.Errorf("engine: relayed block %d has %d bytes, want %d", req.Key.Block, n, want)
-		}
+	// Cache only a block validated against the object geometry. Streamed
+	// mismatches abort downstream and quarantine the actual faulty parent;
+	// unresolved geometry cannot admit bytes to the write-once cache.
+	if validated {
 		e.putBlock(req.Key, buf.Bytes(), req.Key.Chunk)
 	}
 	return n, true, nil

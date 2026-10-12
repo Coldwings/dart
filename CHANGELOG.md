@@ -17,6 +17,8 @@ every release's upgrade notes.
 - Abort committed peer streams on source errors or known relay geometry
   mismatches so a partial chunked response cannot look like a successful block.
   Quarantine parents serving invalid block geometry so retries can use origin.
+  Record transport/validation outcomes with admission-generation permits so
+  older in-flight completions cannot undo quarantine or consume new probes.
 
 ### Upgrade notes
 

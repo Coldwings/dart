@@ -164,7 +164,23 @@ func (l *lazyWriter) Write(p []byte) (int, error) {
 // arrives, without buffering the whole block. It returns the number of bytes
 // written; held is false if the peer returned 404 (nothing written).
 func (c *Client) Stream(ctx context.Context, addr string, req BlockRequest, w io.Writer) (n int64, held bool, err error) {
-	if err := c.allow(addr); err != nil {
+	return c.stream(ctx, addr, req, w, nil)
+}
+
+// StreamValidated streams like Stream, then validates a clean successful body
+// before recording the peer outcome. A validation error is a definitive block
+// protocol failure: it opens the parent circuit and returns the streamed byte
+// count with held=true and the error. The validator must return nil when it
+// cannot validate; it is not called on misses or transport/body errors. Nil
+// validation is equivalent to Stream. It runs inline, owns no shared state,
+// and must respect the supplied, request-timeout-bounded context for any I/O.
+func (c *Client) StreamValidated(ctx context.Context, addr string, req BlockRequest, w io.Writer, validate func(context.Context, int64) error) (n int64, held bool, err error) {
+	return c.stream(ctx, addr, req, w, validate)
+}
+
+func (c *Client) stream(ctx context.Context, addr string, req BlockRequest, w io.Writer, validate func(context.Context, int64) error) (n int64, held bool, err error) {
+	permit, err := c.allow(addr)
+	if err != nil {
 		return 0, false, err
 	}
 	caller := ctx // caller cancellation is not a peer failure (see Get)
@@ -172,7 +188,7 @@ func (c *Client) Stream(ctx context.Context, addr string, req BlockRequest, w io
 	defer cancel()
 	hreq, err := http.NewRequestWithContext(ctx, http.MethodGet, blockURL(addr, req.Key), nil)
 	if err != nil {
-		c.record(addr, outcomeSoftFail)
+		c.record(addr, permit, outcomeSoftFail)
 		return 0, false, err
 	}
 	if req.URL != "" {
@@ -187,9 +203,9 @@ func (c *Client) Stream(ctx context.Context, addr string, req BlockRequest, w io
 	resp, err := client.Do(hreq)
 	if err != nil {
 		if caller.Err() != nil {
-			c.record(addr, outcomeAnswered)
+			c.record(addr, permit, outcomeAnswered)
 		} else {
-			c.record(addr, classify(err))
+			c.record(addr, permit, classify(err))
 		}
 		return 0, false, err
 	}
@@ -199,23 +215,29 @@ func (c *Client) Stream(ctx context.Context, addr string, req BlockRequest, w io
 		n, err = io.Copy(w, resp.Body)
 		if err != nil {
 			if caller.Err() != nil {
-				c.record(addr, outcomeAnswered) // we aborted; the peer is fine
+				c.record(addr, permit, outcomeAnswered) // we aborted; the peer is fine
 			} else {
-				c.record(addr, outcomeSoftFail)
+				c.record(addr, permit, outcomeSoftFail)
 			}
 			return n, true, fmt.Errorf("peer %s: stream body: %w", addr, err)
 		}
-		c.record(addr, outcomeAnswered)
+		if validate != nil {
+			if err := validate(ctx, n); err != nil {
+				c.record(addr, permit, outcomeHardFail)
+				return n, true, fmt.Errorf("peer %s: invalid stream: %w", addr, err)
+			}
+		}
+		c.record(addr, permit, outcomeAnswered)
 		return n, true, nil
 	case http.StatusNotFound:
-		c.record(addr, outcomeAnswered) // answered; simply does not hold the block
+		c.record(addr, permit, outcomeAnswered) // answered; simply does not hold the block
 		return 0, false, nil
 	default:
 		if err := upstreamRefusal(addr, resp); err != nil {
-			c.record(addr, outcomeAnswered) // the peer is fine; our credential is not
+			c.record(addr, permit, outcomeAnswered) // the peer is fine; our credential is not
 			return 0, false, err
 		}
-		c.record(addr, outcomeSoftFail)
+		c.record(addr, permit, outcomeSoftFail)
 		return 0, false, fmt.Errorf("peer %s: unexpected status %s", addr, resp.Status)
 	}
 }

@@ -131,6 +131,7 @@ type StreamSource func(ctx context.Context, req BlockRequest, w io.Writer, sizer
 func StoreStreamSource(s store.Store) StreamSource
 type StreamServer struct { NodeID string; Src StreamSource }
 func (c *Client) Stream(ctx, addr string, req BlockRequest, w io.Writer) (n int64, held bool, err error)
+func (c *Client) StreamValidated(ctx context.Context, addr string, req BlockRequest, w io.Writer, validate func(context.Context, int64) error) (n int64, held bool, err error)
 ```
 
 These are the **cut-through** counterparts: a relay copies bytes from its
@@ -153,6 +154,17 @@ bytes after ~one block-transfer time rather than depth x block-transfer time).
   failures still produce the normal error status. Callers invoking `ServeHTTP`
   directly must account for this sentinel panic (the normal HTTP server does).
 - Each write is flushed, pushing bytes downstream promptly.
+- `StreamValidated` calls the validator once on a clean `200` body, before
+  recording success. Nil validation is equivalent to `Stream`; misses and
+  body/transport errors do not call it. A validator error means a definitive
+  block protocol violation: the circuit opens and the method returns the byte
+  count, `held=true`, and a wrapped error. Return nil when validation is
+  unavailable. The callback runs inline with a timeout-bounded request context,
+  must honor that context for I/O, and must not retain/mutate caller-owned
+  stream state concurrently. Time is O(body length) plus validation work;
+  auxiliary memory is the same bounded copy buffer as `Stream`, plus the
+  validator's own allocations. The engine validates geometry this way before
+  admitting relayed bytes to its write-once cache.
 
 ```go
 srv := &peer.StreamServer{NodeID: myID, Src: engine.PeerStreamSource()}
@@ -229,10 +241,17 @@ made a departed node slow to route around. Opening on one observation stays safe
 because opening is cheap and **reversible**: the cooldown plus the half-open probe
 restores a recovered peer with no operator action.
 
-The engine also uses `RecordHardFailure` after validating a definitively invalid
-relay block: transport-level success cannot establish that the block is usable.
-It quarantines the faulty parent even though the HTTP transfer completed, and
-normal cooldown/half-open probes can recover the peer later.
+`StreamValidated` records a validated protocol violation as a hard failure,
+without first recording transport success. Every `Client` request (Get, Stream,
+StreamValidated and FetchRoster) binds its result to the breaker entry and
+generation captured when it starts. Opening a circuit or recovering from
+half-open invalidates older results. Checking the permit and recording the
+outcome occur under the same mutex: an old success cannot clear quarantine or
+consume a newer half-open probe slot; an old failure cannot undo recovery.
+Evicted entries are not recreated by their old requests' completions. Fresh
+roster requests still bypass admission and can restore discovery reachability.
+The public `Allow`/`Record*` API remains an explicit, unscoped reporting API;
+callers managing those reports themselves must synchronize their lifecycle.
 
 Defaults: `DefaultFailureThreshold` 5, `DefaultBreakerCooldown` 5s,
 `DefaultHalfOpenProbes` 1. `Options.Now` injects a clock for tests. The engine
@@ -345,7 +364,7 @@ doubles as the health probe that restores the data path.
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **89.3%** of statements. Uncovered lines are a couple of rare
+- **Coverage**: **89.8%** of statements. Uncovered lines are a couple of rare
   I/O-error branches.
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.
@@ -374,6 +393,9 @@ go test ./internal/peer/ -race -count=1
 | `TestStoreStreamSourceRoundtrip` | streaming server/client returns exact block bytes |
 | `TestStreamServerSetsContentLength` | known-size block is Content-Length framed, not chunked |
 | `TestStreamServerMissAndErrors` | miss → 404 with nothing written; bad path → 400; non-GET → 405 |
+| `TestClientLateFailureCannotUndoRecovery` | an old failed request cannot reopen a circuit recovered by a current half-open probe |
+| `TestStreamValidatedUsesRequestContext` | validation receives the bounded peer request context and the streamed byte count |
+| `TestClientLateSuccessCannotClearProtocolQuarantine` | deterministic barriers cover stale Get/Stream/roster success during open and half-open states; only a current probe can recover the circuit |
 | `TestStreamServerAbortsCommittedErrors` | real HTTP clients detect unexpected EOF after partial source errors with either chunked or Content-Length framing |
 | `TestStreamServerEarlyErrorGives500` | source failing before any write → clean 500 |
 | `TestCutThroughPipelines` | **the first half reaches the client while the source still holds the second** (genuinely pipelined, not buffered) |

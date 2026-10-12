@@ -81,10 +81,11 @@ type Breaker struct {
 
 // breakerEntry is one peer's circuit.
 type breakerEntry struct {
-	state    BreakerState
-	failures int       // consecutive failures
-	openedAt time.Time // when the circuit last opened
-	inFlight int       // half-open probes currently outstanding
+	state      BreakerState
+	generation uint64    // invalidates results from requests admitted before a transition
+	failures   int       // consecutive failures
+	openedAt   time.Time // when the circuit last opened
+	inFlight   int       // half-open probes currently outstanding
 	// lastActive stamps the last request activity (Allow or a Record*
 	// report). It keys LRU eviction under map pressure: an entry nobody
 	// routes to anymore is stale state for a departed address. Read-only
@@ -181,88 +182,98 @@ func (b *Breaker) evictStalestLocked() {
 // the half-open state it has reserved a probe slot, so the caller MUST report the
 // outcome via RecordSuccess or RecordFailure.
 func (b *Breaker) Allow(addr string) bool {
+	_, allowed := b.begin(addr, true)
+	return allowed
+}
+
+// breakerPermit binds a Client result to the entry and generation at request
+// admission. Entry identity also protects against eviction/reuse of an address.
+type breakerPermit struct {
+	breaker    *Breaker
+	entry      *breakerEntry
+	generation uint64
+}
+
+// begin can bypass admission for discovery while still scoping its result.
+func (b *Breaker) begin(addr string, enforce bool) (breakerPermit, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	e := b.entryLocked(addr)
-	e.lastActive = b.now() // a routing attempt is activity, even when rejected
-	switch e.state {
-	case BreakerOpen:
-		return false
-	case BreakerHalfOpen:
-		if e.inFlight >= b.probes {
-			return false
+	e.lastActive = b.now()
+	if enforce {
+		switch e.state {
+		case BreakerOpen:
+			return breakerPermit{}, false
+		case BreakerHalfOpen:
+			if e.inFlight >= b.probes {
+				return breakerPermit{}, false
+			}
+			e.inFlight++
 		}
-		e.inFlight++
-		return true
-	default:
-		return true
 	}
+	return breakerPermit{breaker: b, entry: e, generation: e.generation}, true
 }
 
 // RecordSuccess reports that addr answered. A success closes the circuit and
 // clears the failure count: the peer is demonstrably reachable.
 func (b *Breaker) RecordSuccess(addr string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	e := b.entryLocked(addr)
-	e.lastActive = b.now()
-	if e.inFlight > 0 {
-		e.inFlight--
-	}
-	e.state = BreakerClosed
-	e.failures = 0
+	b.record(addr, outcomeAnswered, nil)
 }
 
 // RecordFailure reports that addr failed to answer (transport error, timeout, or
 // an unexpected status). Reaching the threshold opens the circuit; a failure while
 // half-open re-opens it immediately, restarting the cooldown.
 func (b *Breaker) RecordFailure(addr string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	e := b.entryLocked(addr)
-	e.lastActive = b.now()
-	if e.inFlight > 0 {
-		e.inFlight--
-	}
-	e.failures++
-	switch {
-	case e.state == BreakerHalfOpen:
-		// A failed probe re-opens with a fresh cooldown.
-		e.state = BreakerOpen
-		e.openedAt = b.now()
-	case e.state != BreakerOpen && e.failures >= b.threshold:
-		e.state = BreakerOpen
-		e.openedAt = b.now()
-	}
-	// A failure that arrives while already Open (a late in-flight request dying)
-	// must NOT restamp openedAt: the cooldown starts when the circuit opens,
-	// otherwise a steady trickle of late completions pins it open forever.
+	b.record(addr, outcomeSoftFail, nil)
 }
 
-// RecordHardFailure reports a definitive peer failure: a failed dial, or an
-// unusable block whose protocol violation was validated by the engine after
-// a transport-level success. The circuit opens immediately rather than
-// spending the whole failure budget
-// rediscovering it one dial timeout at a time — which is what made an abruptly
-// dead machine take tens of seconds to route around.
+// RecordHardFailure reports a definitive peer failure: a failed dial, or a
+// validated block protocol violation despite a completed HTTP exchange. It
+// opens immediately rather than spending the whole failure budget rediscovering
+// an unusable peer one request at a time.
 //
 // Opening on a single observation is safe because opening is cheap and
 // reversible: the cooldown plus the half-open probe brings a recovered peer back
 // without operator action.
 func (b *Breaker) RecordHardFailure(addr string) {
+	b.record(addr, outcomeHardFail, nil)
+}
+
+// record validates the request generation and updates its outcome under one
+// lock. An old completion cannot close a newer quarantine, consume a current
+// half-open probe, or recreate an entry evicted while that request was flying.
+// The public Record* methods retain their explicit, unscoped reporting API;
+// Client uses permits so delayed network completions are generation-safe.
+func (b *Breaker) record(addr string, o outcome, permit *breakerPermit) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if permit != nil {
+		e := b.peers[addr]
+		if e != permit.entry || e.generation != permit.generation {
+			return
+		}
+	}
 	e := b.entryLocked(addr)
 	e.lastActive = b.now()
 	if e.inFlight > 0 {
 		e.inFlight--
 	}
+	if o == outcomeAnswered {
+		if e.state != BreakerClosed {
+			e.generation++
+			e.inFlight = 0
+		}
+		e.state, e.failures = BreakerClosed, 0
+		return
+	}
 	e.failures++
-	if e.state != BreakerOpen {
+	if e.state != BreakerOpen && (o == outcomeHardFail || e.state == BreakerHalfOpen || e.failures >= b.threshold) {
 		e.state = BreakerOpen
+		e.generation++
+		e.inFlight = 0
 		e.openedAt = b.now()
 	}
-	// Already open: keep the original openedAt (see RecordFailure).
+	// Already-open failures never extend cooldown; old permits are ignored.
 }
 
 // State returns addr's current circuit state, applying any due transition.
