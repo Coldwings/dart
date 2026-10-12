@@ -239,9 +239,10 @@ func (b *Breaker) RecordFailure(addr string) {
 	// otherwise a steady trickle of late completions pins it open forever.
 }
 
-// RecordHardFailure reports that addr could not be reached at all (the dial
-// failed or timed out). Unlike a slow or erroring peer, that is definitive, so
-// the circuit opens immediately instead of spending the whole failure budget
+// RecordHardFailure reports a definitive peer failure: a failed dial, or an
+// unusable block whose protocol violation was validated by the engine after
+// a transport-level success. The circuit opens immediately rather than
+// spending the whole failure budget
 // rediscovering it one dial timeout at a time — which is what made an abruptly
 // dead machine take tens of seconds to route around.
 //

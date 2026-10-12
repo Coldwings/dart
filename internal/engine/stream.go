@@ -150,6 +150,13 @@ func (e *Engine) relayFromParent(ctx context.Context, req peer.BlockRequest, w i
 	if serr == nil && size >= 0 && !e.RangeUnsupported(req.URL) {
 		want := e.blockLen(size, int64(req.Key.Block))
 		if want <= 0 || n != want || int64(buf.Len()) != want {
+			if e.peer.Breaker != nil {
+				// Stream recorded the clean HTTP EOF as success, clearing
+				// consecutive failures. This block is definitively unusable:
+				// quarantine its parent immediately, or each next clean but
+				// invalid response would reset a soft-failure budget again.
+				e.peer.Breaker.RecordHardFailure(addr)
+			}
 			return n, false, fmt.Errorf("engine: relayed block %d has %d bytes, want %d", req.Key.Block, n, want)
 		}
 		e.putBlock(req.Key, buf.Bytes(), req.Key.Chunk)

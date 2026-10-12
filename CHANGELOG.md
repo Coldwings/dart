@@ -16,6 +16,7 @@ every release's upgrade notes.
   while retaining digest-keyed block deduplication across origins.
 - Abort committed peer streams on source errors or known relay geometry
   mismatches so a partial chunked response cannot look like a successful block.
+  Quarantine parents serving invalid block geometry so retries can use origin.
 
 ### Upgrade notes
 

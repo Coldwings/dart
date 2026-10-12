@@ -166,7 +166,7 @@ func NewBreaker(BreakerOptions) *Breaker  // {FailureThreshold, Cooldown, HalfOp
 func (b *Breaker) Allow(addr string) bool
 func (b *Breaker) RecordSuccess(addr string)
 func (b *Breaker) RecordFailure(addr string)      // soft: spends one unit of budget
-func (b *Breaker) RecordHardFailure(addr string)  // definitive: opens at once
+func (b *Breaker) RecordHardFailure(addr string)  // definitive dial/protocol failure: opens at once
 func (b *Breaker) State(addr string) BreakerState   // closed | open | half-open
 func (b *Breaker) Healthy(addr string) bool         // usable now (no probe reserved)
 func (b *Breaker) OpenCount() int
@@ -228,6 +228,11 @@ spending the whole budget on it — five dial timeouts, serially — is exactly 
 made a departed node slow to route around. Opening on one observation stays safe
 because opening is cheap and **reversible**: the cooldown plus the half-open probe
 restores a recovered peer with no operator action.
+
+The engine also uses `RecordHardFailure` after validating a definitively invalid
+relay block: transport-level success cannot establish that the block is usable.
+It quarantines the faulty parent even though the HTTP transfer completed, and
+normal cooldown/half-open probes can recover the peer later.
 
 Defaults: `DefaultFailureThreshold` 5, `DefaultBreakerCooldown` 5s,
 `DefaultHalfOpenProbes` 1. `Options.Now` injects a clock for tests. The engine
