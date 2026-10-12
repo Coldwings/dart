@@ -145,7 +145,13 @@ bytes after ~one block-transfer time rather than depth x block-transfer time).
 - The server defers the response header until the first byte is written, so a
   source that declines (`held=false`) or fails early still yields a clean
   `404`/`500` rather than a truncated `200`.
-- A `StreamSource` MUST NOT write anything when returning `held=false`.
+- A clean decline (`held=false`, `err=nil`) MUST NOT write anything. A failure
+  after partial writes returns an error; the server aborts the committed
+  response using `http.ErrAbortHandler`, which net/http handles without logging
+  a panic stack. Returning normally would emit a valid chunked terminator and
+  hide the failure. The same abort applies to Content-Length responses; early
+  failures still produce the normal error status. Callers invoking `ServeHTTP`
+  directly must account for this sentinel panic (the normal HTTP server does).
 - Each write is flushed, pushing bytes downstream promptly.
 
 ```go
@@ -334,7 +340,7 @@ doubles as the health probe that restores the data path.
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **87.1%** of statements. Uncovered lines are a couple of rare
+- **Coverage**: **89.3%** of statements. Uncovered lines are a couple of rare
   I/O-error branches.
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.
@@ -363,6 +369,7 @@ go test ./internal/peer/ -race -count=1
 | `TestStoreStreamSourceRoundtrip` | streaming server/client returns exact block bytes |
 | `TestStreamServerSetsContentLength` | known-size block is Content-Length framed, not chunked |
 | `TestStreamServerMissAndErrors` | miss → 404 with nothing written; bad path → 400; non-GET → 405 |
+| `TestStreamServerAbortsCommittedErrors` | real HTTP clients detect unexpected EOF after partial source errors with either chunked or Content-Length framing |
 | `TestStreamServerEarlyErrorGives500` | source failing before any write → clean 500 |
 | `TestCutThroughPipelines` | **the first half reaches the client while the source still holds the second** (genuinely pipelined, not buffered) |
 | `TestStreamRelayChain` | two chained stream servers relay bytes intact |

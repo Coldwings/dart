@@ -117,9 +117,10 @@ origin and the peer paths:
   bytes it forwards: relay responses carry no Content-Length (chunked), so a
   short clean EOF is indistinguishable from success at the transport — the
   relay compares the streamed length against the geometry before caching. A
-  mismatched block is still served on (the leaf's own check protects clients)
-  but never cached; when the object size cannot be resolved the relayed bytes
-  cannot be validated and are not cached either.
+  mismatched block fails the relay and is never cached. The peer server aborts
+  the committed response, so downstream observes truncation even with chunked
+  framing. When the object size cannot be resolved, relayed bytes cannot be
+  validated and are not cached either.
 
 This is load-bearing because the block cache is **write-once per key**: a later
 correct fetch can never overwrite a bad block, only eviction would clear it. So
@@ -401,7 +402,8 @@ go test ./internal/engine/ -cover -count=1
 | `TestPeerStreamSourceLocalHit` | locally-held block streamed from the store |
 | `TestPeerStreamSourceRootFetchesOrigin` | tree root satisfies a relay request from origin and caches it |
 | `TestStreamRelayChainThroughEngines` | 3-node fanout=1 chain over streaming peer servers: bytes intact, every node cached |
-| `TestStreamRelayRejectsWrongLengthBlock` | a short clean chunked relay stream is served on but never cached; a correct relay is cached |
+| `TestStreamRelayRejectsWrongLengthBlock` | a short clean parent stream makes the relay abort downstream and never cache; a correct relay is cached |
+| `TestStreamRelayPropagatesParentFailure` | an interrupted parent stream remains an unexpected EOF through a real intermediate engine; no partial block is cached |
 | `TestStreamRelayDoesNotCacheWhenSizeUnresolved` | relayed bytes are not cached when the object size cannot be resolved |
 | `TestClassOfMatchesPlacement` | owned iff in HRW top-`Replicas`, else borrowed; `Replicas=3` makes all members owners |
 | `TestClassOfSingleNodeIsOwned` | without P2P everything cached is owned |

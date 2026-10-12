@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 
 	"github.com/data-accelerator/dart/internal/chunk"
@@ -141,12 +142,16 @@ func (e *Engine) relayFromParent(ctx context.Context, req peer.BlockRequest, w i
 	// cannot detect a short clean chunked EOF; the relay must enforce what
 	// the buffered path enforces in block(), or a wrongly-sized block would
 	// sit in the write-once cache permanently and propagate to every
-	// downstream hop. A mismatched block is still served on (the leaf's own
-	// geometry check in block() protects clients, and these bytes came from
-	// a node we trust) but is never cached. When the size cannot be resolved
-	// the relayed bytes cannot be validated, so they are not cached either.
+	// downstream hop. A mismatch fails the stream so the peer server aborts
+	// its committed response instead of reporting clean chunked success.
+	// When the size cannot be resolved, the relayed bytes cannot be validated,
+	// so they are not cached either.
 	size, serr := e.Size(ctx, req.URL)
-	if serr == nil && n > 0 && int64(buf.Len()) == e.blockLen(size, int64(req.Key.Block)) {
+	if serr == nil && size >= 0 && !e.RangeUnsupported(req.URL) {
+		want := e.blockLen(size, int64(req.Key.Block))
+		if want <= 0 || n != want || int64(buf.Len()) != want {
+			return n, false, fmt.Errorf("engine: relayed block %d has %d bytes, want %d", req.Key.Block, n, want)
+		}
 		e.putBlock(req.Key, buf.Bytes(), req.Key.Chunk)
 	}
 	return n, true, nil

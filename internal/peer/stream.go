@@ -20,9 +20,10 @@ import (
 // straight to the downstream socket without buffering the whole block, so a
 // multi-hop chain pipelines instead of storing-and-forwarding at every hop.
 //
-// Implementations MUST NOT write anything when returning held=false, and MUST
-// write exactly n bytes when returning n. If size is known before writing, the
-// implementation reports it via the sizer callback so the server can set
+// On a clean decline (held=false, err=nil), implementations MUST NOT write
+// anything. A failure after partial writes returns err and aborts the response.
+// Implementations MUST write exactly n bytes when returning n. If size is
+// known before writing, report it via the sizer callback so the server can set
 // Content-Length; otherwise the response is chunked.
 //
 // To report that the *origin* refused the fetch-on-behalf (rather than this node
@@ -102,7 +103,7 @@ func (s *StreamServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Buffer the head of the stream so a "not held" or an immediate error can
 	// still produce a clean 404/500 before any body byte is committed.
 	lw := &lazyWriter{w: w, node: s.NodeID}
-	n, held, err := s.Src(r.Context(), req, lw, lw.setSize)
+	_, held, err := s.Src(r.Context(), req, lw, lw.setSize)
 	switch {
 	case err != nil && !lw.started:
 		// Distinguish "the origin refused our requester's credential" from "this
@@ -117,14 +118,9 @@ func (s *StreamServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case !held && !lw.started:
 		http.Error(w, "block not held", http.StatusNotFound)
 	case err != nil:
-		// Headers already sent; the truncated body signals the failure. When a
-		// size was reported the client detects the truncation via Content-Length
-		// mismatch; on a chunked response (no sizer call) an abrupt mid-body
-		// failure surfaces as unexpected EOF — but a *clean* chunked EOF is
-		// indistinguishable from success, so a cut-through relay must validate
-		// the streamed length against the object geometry itself (the engine's
-		// relay does; see engine.relayFromParent).
-		_ = n
+		// Returning normally would emit a clean chunked EOF and hide the
+		// failure. Abort the response so downstream observes truncation.
+		panic(http.ErrAbortHandler)
 	}
 }
 
