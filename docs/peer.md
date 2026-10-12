@@ -35,6 +35,11 @@ X-DART-Hop:    <n>              (relay depth, for loop safety)
   sources decline anything above `chunk.Config.MaxBlockIndex()` with a `404`
   (issue #52, see docs/engine.md §3.5). `StoreSource` never does range
   arithmetic with the index, so it needs no such check.
+- When `X-DART-Origin` is present, engine sources verify that the wire chunk
+  key agrees with the URL's object identity, namespace and block's chunk index.
+  An inconsistent pair is a requester error and yields `404` before cache or
+  upstream access; it must not quarantine an honest parent. Cache-only requests
+  without this header remain valid.
 - `X-DART-Origin` lets a relay-capable Source fetch a block it does not hold
   (via its own parent/origin); `X-DART-Hop` bounds relay recursion.
 - `X-DART-Hop` is optional (absent = depth 0) and must be a non-negative

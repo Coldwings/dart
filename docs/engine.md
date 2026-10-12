@@ -187,6 +187,16 @@ relay) **before** cache lookup, relay selection, size probe, or origin I/O.
 Declined, not errored: the malformed index is the requester's fault, and a 500
 would charge this healthy relay on the requester's circuit breaker.
 
+**Origin/key consistency is checked at the same boundary.** When a request
+supplies `X-DART-Origin`, both sources recompute its expected chunk key from
+`(namespace, chunk.ObjectID(url), ChunkOfBlock(blockIndex))`. A different key
+is a requester addressing error and is declined before local cache lookup,
+parent selection or any origin probe. This prevents an honest parent serving
+a requested cached block from being blamed for a different URL's geometry.
+Requests without an Origin URL remain valid cache-only reads; a cold one
+cannot relay. Identity checking takes O(URL length) time and space, adds no
+network traffic, and preserves cut-through streaming.
+
 ### 3.6 `func (e *Engine) PeerStreamSource() peer.StreamSource`
 
 The **cut-through** counterpart of `PeerSource`, for a `peer.StreamServer`:
@@ -344,6 +354,11 @@ requests; their bytes are counted as both `client` and `origin_in` wire bytes
    never turned into a whole-object origin GET (issue #52; the fetch-layer
    arithmetic guard is in docs/fetch.md §3.4).
 
+6. **No requester identity confusion on the relay path**: when an Origin URL
+   is supplied, its namespace/object/chunk key must match the requested key.
+   Inconsistent requests yield a clean decline, even if the local cache holds
+   that key; requester errors never trigger parent fetches or quarantine.
+
 ## 5. Concurrency & Call Permissions
 
 - `Engine` is safe for concurrent use: the size cache is mutex-guarded, the
@@ -361,7 +376,7 @@ requests; their bytes are counted as both `client` and `origin_in` wire bytes
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **86.9%** of statements. Uncovered lines are mostly rare I/O
+- **Coverage**: **87.4%** of statements. Uncovered lines are mostly rare I/O
   error branches (short block, mid-stream write error).
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.
@@ -409,6 +424,7 @@ go test ./internal/engine/ -cover -count=1
 | `TestPeerStreamSourceRootFetchesOrigin` | tree root satisfies a relay request from origin and caches it |
 | `TestStreamRelayChainThroughEngines` | 3-node fanout=1 chain over streaming peer servers: bytes intact, every node cached |
 | `TestStreamRelayRejectsWrongLengthBlock` | a short clean parent stream makes the relay abort downstream and never cache; a correct relay is cached |
+| `TestRelayDeclinesInconsistentKeyURL` | buffered/streaming, warm/cold relays decline unrelated URLs, wrong chunk indices and namespaces without contacting origins/parents or tripping circuits; valid and cache-only reads still work |
 | `TestStreamRelayQuarantinesWrongLengthParent` | a clean but invalid parent response opens that parent's circuit; repeated requests fetch origin once and then use the correct cached block |
 | `TestStreamRelayPropagatesParentFailure` | an interrupted parent stream remains an unexpected EOF through a real intermediate engine; no partial block is cached |
 | `TestStreamRelayDoesNotCacheWhenSizeUnresolved` | relayed bytes are not cached when the object size cannot be resolved |

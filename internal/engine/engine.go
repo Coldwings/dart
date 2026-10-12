@@ -313,6 +313,22 @@ func (e *Engine) relayableBlockIndex(b uint64) bool {
 	return b <= uint64(e.cfg.MaxBlockIndex())
 }
 
+// relayableRequest checks requester-supplied addressing before cache lookup or
+// parent/origin I/O. A key and Origin URL are independent wire fields: comparing
+// a held block against an unrelated URL's geometry would blame an honest peer.
+// Cache-only requests omit URL and need only the signed-index bound.
+func (e *Engine) relayableRequest(req peer.BlockRequest) bool {
+	if !e.relayableBlockIndex(req.Key.Block) {
+		return false
+	}
+	if req.URL == "" {
+		return true
+	}
+	oid, _ := chunk.ObjectID(req.URL)
+	want := chunk.ChunkKey(e.ns, oid, e.cfg.ChunkOfBlock(int64(req.Key.Block)))
+	return req.Key.Chunk == want
+}
+
 // block returns the bytes of one block: from the local cache, else (with P2P)
 // from its parent in the distribution tree, else from origin. Fetched bytes are
 // cached. hop is the relay depth (0 when serving a local client).
@@ -455,9 +471,9 @@ func (e *Engine) fileKey(objectID string) uint64 {
 // P2P node; a store-only node can use peer.StoreSource instead.
 func (e *Engine) PeerSource() peer.Source {
 	return func(ctx context.Context, req peer.BlockRequest) ([]byte, bool, error) {
-		if !e.relayableBlockIndex(req.Key.Block) {
+		if !e.relayableRequest(req) {
 			e.mx.recordRelay(false)
-			return nil, false, nil // malformed wire index: decline cheaply
+			return nil, false, nil // malformed requester addressing: decline cheaply
 		}
 		if data, ok, err := e.store.Get(req.Key); err != nil {
 			return nil, false, err
