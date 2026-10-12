@@ -44,7 +44,7 @@ back to all-member routing for that lookup (the reader set is soft state).
 | Term | Meaning |
 |---|---|
 | `Engine` | Orchestrator: Size + Serve over cache/origin. |
-| object size | Learned once per object via a 1-byte probe, cached in-process. |
+| object size | Learned once per origin endpoint via a 1-byte probe, cached in-process. |
 | `Handler` | `http.Handler` translating HTTP Range ⇄ `Engine.Serve`. |
 
 ## 3. Public API
@@ -79,10 +79,18 @@ only when `Cluster`, `Peer`, and `SelfID` are all set.
 ### 3.2 `func (e *Engine) Size(ctx, url string) (int64, error)`
 
 Returns the object's total size, probing origin once (a `bytes=0-0` fetch) and
-caching the result by object identity (`chunk.ObjectID`). For immutable
-content-addressed objects the size is permanently valid. The probe also
-records whether the origin honored the Range: a `200` answer marks the object
-Range-unsupported (see §3.9).
+caching the result by endpoint identity (`fetch.OriginKey`), independently of
+the content digest. The same immutable digest can be served by two endpoints
+with different Range support or one with an unknown chunked total. Each is
+probed separately; refreshed signatures for the same endpoint reuse metadata.
+A `200` answer marks only that endpoint Range-unsupported (see §3.9).
+
+When the fetcher implements `fetch.Prober`, `Size` calls `Probe` so concurrent
+metadata flights also stay endpoint-scoped, even when block flights are keyed
+by digest. Custom fetchers without `Prober` receive `Fetch(ctx, url, 0, 0)` and
+must not coalesce these probes across endpoints. Blocks still use
+`chunk.ObjectID` and remain shared across origins. A metadata hit costs O(URL
+length) key derivation and a map lookup; a miss adds one ranged GET.
 
 A `206` that hides the total (`Content-Range: bytes 0-0/*`) is a **probe
 failure**, not a size: block geometry is impossible without the total, and
@@ -273,9 +281,11 @@ func (e *Engine) ServePassthrough(ctx context.Context, w http.ResponseWriter, r 
 An origin that ignores `Range` cannot be served through the block layer: every
 per-block fetch would pull the whole object, and a block so fetched could never
 be safely cached for a *different* range. When the `Size` probe (a `bytes=0-0`
-GET) is answered with `200` instead of `206`, the object is marked
+GET) is answered with `200` instead of `206`, that origin endpoint is marked
 Range-unsupported (process-local, never expires — a restart re-probes), and
-`Handler` then serves every request for it with `ServePassthrough`:
+`Handler` then serves requests for that endpoint with `ServePassthrough`.
+Another endpoint for the same digest can still use the cache and P2P:
+
 
 - the client's `Range` header is forwarded, and the origin's status, entity
   headers (`Content-Type`/`Content-Length`/`Content-Range`/`ETag`/
@@ -344,7 +354,7 @@ requests; their bytes are counted as both `client` and `origin_in` wire bytes
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **85.4%** of statements. Uncovered lines are mostly rare I/O
+- **Coverage**: **86.9%** of statements. Uncovered lines are mostly rare I/O
   error branches (short block, mid-stream write error).
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.
@@ -365,6 +375,8 @@ go test ./internal/engine/ -cover -count=1
 | `TestServeAcrossBlocksAndChunks` | a range crossing block/chunk boundaries is assembled correctly |
 | `TestServeEndClampAndBadStart` | end clamped to size; start beyond size errors |
 | `TestSize` | object size probed correctly |
+| `TestSizeScopesRangeCapabilityToOrigin` | both probe orders and known/unknown totals stay origin-scoped; refreshed signatures reuse metadata and digest blocks remain shared |
+| `TestConcurrentSizeProbesDoNotShareCapabilities` | a blocked Range-blind endpoint does not delay or contaminate an independent endpoint probe |
 | `TestSizeHiddenTotalIsProbeFailure` | a 206 hiding the total fails loudly, caches nothing, and never fabricates a size |
 | `TestCacheHitAvoidsRefetch` | repeated identical serve makes zero origin requests |
 | `TestConcurrentServe` | overlapping concurrent reads correct and race-free |
@@ -450,7 +462,7 @@ go test ./internal/engine/ -cover -count=1
   fan-out and prefetch of subsequent blocks are future work.
 - **Streaming vs buffering**: blocks are fetched whole into memory (bounded by
   block size) then written; fine for cache hits/`sendfile` later.
-- **Size cache lifetime**: sizes are cached for process life with no TTL —
+- **Size cache lifetime**: endpoint probe results are cached for process life with no TTL —
   correct for immutable objects; mutable objects need the policy layer.
 - **Mid-stream errors**: once headers are sent, a block error can only truncate
   the body (client detects via Content-Length); prefetching the first block

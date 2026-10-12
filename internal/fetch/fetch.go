@@ -107,6 +107,33 @@ type Fetcher interface {
 	Fetch(ctx context.Context, url string, start, end int64) (Range, error)
 }
 
+// Prober optionally separates endpoint metadata probes from content fetches.
+// Engines use it to keep a digest-keyed flight from sharing one origin's Range
+// capability with another. Implementations probe with GET bytes=0-0.
+type Prober interface {
+	Probe(ctx context.Context, url string) (Range, error)
+}
+
+// OriginKey identifies an endpoint, not its content: different hosts or
+// escaped paths stay distinct even when they name the same digest. Scheme and
+// host are lower-cased; userinfo, query and fragment are excluded so credentials
+// never enter metadata keys and refreshed signatures share an endpoint probe.
+func OriginKey(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		if i := strings.IndexAny(rawURL, "?#"); i >= 0 {
+			return rawURL[:i]
+		}
+		return rawURL
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	u.Host = strings.ToLower(u.Host)
+	u.User = nil
+	u.RawQuery, u.Fragment, u.RawFragment = "", "", ""
+	u.ForceQuery = false
+	return u.String()
+}
+
 // HTTPFetcher fetches byte ranges over HTTP/HTTPS.
 type HTTPFetcher struct {
 	// Client is the HTTP client; nil uses http.DefaultClient.
@@ -426,10 +453,12 @@ type Coalescing struct {
 	// DefaultMaxFlight.
 	MaxFlight time.Duration
 	g         group
+	probes    group
 }
 
 var _ Fetcher = (*Coalescing)(nil)
 var _ Opener = (*Coalescing)(nil)
+var _ Prober = (*Coalescing)(nil)
 
 // identity returns the deduplication identity for url.
 func (c *Coalescing) identity(url string) string {
@@ -471,8 +500,20 @@ func (c *Coalescing) maxFlight() time.Duration {
 // refusal keeps the thundering-herd protection intact on every normal path.
 func (c *Coalescing) Fetch(ctx context.Context, url string, start, end int64) (Range, error) {
 	key := c.identity(url) + "\x00" + strconv.FormatInt(start, 10) + ":" + strconv.FormatInt(end, 10)
+	return c.fetch(ctx, url, start, end, key, &c.g)
+}
+
+// Probe coalesces GET bytes=0-0 by OriginKey, independently of Key and of
+// content flights. Immutable bytes can be shared across endpoints, but a size
+// probe's RangeIgnored/Total metadata describes only the endpoint contacted.
+// It has Fetch's cancellation, deadline and credential-refusal retry semantics.
+func (c *Coalescing) Probe(ctx context.Context, url string) (Range, error) {
+	return c.fetch(ctx, url, 0, 0, OriginKey(url), &c.probes)
+}
+
+func (c *Coalescing) fetch(ctx context.Context, url string, start, end int64, key string, g *group) (Range, error) {
 	for {
-		flight, lead := c.g.acquire(key, c.maxFlight())
+		flight, lead := g.acquire(key, c.maxFlight())
 		if lead {
 			// Exactly one worker goroutine per flight, started by its leader.
 			// It deliberately outlives the leading caller: caller cancellation
@@ -484,7 +525,7 @@ func (c *Coalescing) Fetch(ctx context.Context, url string, start, end int64) (R
 				flightCtx, cancel := context.WithDeadline(context.Background(), flight.end)
 				defer cancel()
 				r, err := c.F.Fetch(flightCtx, url, start, end)
-				c.g.finish(key, flight, r, err)
+				g.finish(key, flight, r, err)
 			}()
 		}
 		// Wait inline rather than on a per-caller goroutine: a caller that

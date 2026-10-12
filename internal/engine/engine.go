@@ -121,15 +121,15 @@ type Engine struct {
 	rs            map[string]*readerSet
 
 	mu    sync.Mutex
-	sizes map[string]sizeMeta // objectID -> probe result
+	sizes map[string]sizeMeta // origin endpoint -> probe result
 
 	// opener streams verbatim origin responses for the passthrough fallback
 	// (Range-ignoring origins); nil when the fetcher cannot stream.
 	opener fetch.Opener
 }
 
-// sizeMeta caches what the size probe learned about an object: its size, and
-// whether the origin honors Range at all. A noRange object must be proxied
+// sizeMeta caches an origin endpoint's size and Range capability.
+// A noRange object must be proxied
 // verbatim — a per-block fetch would pull the whole object per block.
 type sizeMeta struct {
 	size    int64
@@ -185,9 +185,9 @@ func New(opt Options) (*Engine, error) {
 }
 
 // Size returns the total size of the object at url, probing origin once and
-// caching the result by object identity. The probe fetches a single byte and
-// reads the total from the response (Content-Range, or Content-Length if the
-// origin ignores Range). A probe that reveals a Range-ignoring origin also
+// caching the result by fetch.OriginKey (not by digest). The probe fetches a
+// single byte and reads the total from Content-Range (or Content-Length if
+// the origin ignores Range). A probe revealing a Range-ignoring origin also
 // marks the object for passthrough (see RangeUnsupported).
 //
 // A 206 response that hides the total (`Content-Range: bytes 0-0/*`) is a
@@ -197,9 +197,9 @@ func New(opt Options) (*Engine, error) {
 // Size therefore returns an error and caches nothing, so a corrected origin
 // recovers without a restart.
 func (e *Engine) Size(ctx context.Context, url string) (int64, error) {
-	oid, _ := chunk.ObjectID(url)
+	origin := fetch.OriginKey(url)
 	e.mu.Lock()
-	if sm, ok := e.sizes[oid]; ok {
+	if sm, ok := e.sizes[origin]; ok {
 		e.mu.Unlock()
 		return sm.size, nil
 	}
@@ -208,7 +208,14 @@ func (e *Engine) Size(ctx context.Context, url string) (int64, error) {
 	// Probe with a single-byte ranged GET and take the total from Content-Range.
 	// Deliberately not a HEAD: a presigned upstream is signed for GET only (the verb
 	// is inside the signature), so HEAD would return 403. See fetch.Fetcher.
-	r, err := e.fetcher.Fetch(ctx, url, 0, 0)
+	var r fetch.Range
+	var err error
+	if p, ok := e.fetcher.(fetch.Prober); ok {
+		// Content-keyed singleflight must not merge endpoint capabilities.
+		r, err = p.Probe(ctx, url)
+	} else {
+		r, err = e.fetcher.Fetch(ctx, url, 0, 0)
+	}
 	if err != nil {
 		// bytes=0-0 is satisfiable for every non-empty object (RFC 7233), so a
 		// 416 to the probe means the object is empty: cache size 0 and let the
@@ -216,7 +223,7 @@ func (e *Engine) Size(ctx context.Context, url string) (int64, error) {
 		var se *fetch.StatusError
 		if errors.As(err, &se) && se.Code == http.StatusRequestedRangeNotSatisfiable {
 			e.mu.Lock()
-			e.sizes[oid] = sizeMeta{size: 0}
+			e.sizes[origin] = sizeMeta{size: 0}
 			e.mu.Unlock()
 			return 0, nil
 		}
@@ -229,7 +236,7 @@ func (e *Engine) Size(ctx context.Context, url string) (int64, error) {
 	// For a Range-ignoring origin the total may legitimately stay unknown (-1
 	// on a chunked 200); it is never fabricated — the object is proxied
 	// verbatim via ServePassthrough, which needs no size.
-	e.sizes[oid] = sizeMeta{size: r.Total, noRange: r.RangeIgnored}
+	e.sizes[origin] = sizeMeta{size: r.Total, noRange: r.RangeIgnored}
 	e.mu.Unlock()
 	return r.Total, nil
 }
@@ -242,10 +249,10 @@ func (e *Engine) Size(ctx context.Context, url string) (int64, error) {
 // The mark is process-local and never expires: an origin does not grow Range
 // support for an existing object, and a restart re-probes anyway.
 func (e *Engine) RangeUnsupported(url string) bool {
-	oid, _ := chunk.ObjectID(url)
+	origin := fetch.OriginKey(url)
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.sizes[oid].noRange
+	return e.sizes[origin].noRange
 }
 
 // ErrRangeNotSatisfiable is returned by Serve for a start beyond the object.
